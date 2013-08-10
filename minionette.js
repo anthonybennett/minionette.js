@@ -1,4 +1,4 @@
-// Minionette.js 0.3
+// Minionette.js 0.4
 // (c) 2013 Anthony Bennett/
 // Released under LGPL v3 (see license.txt)
 (function(root, factory) {
@@ -15,12 +15,13 @@
 	var Minionette = exports,
 		slice = [].slice;
 
-	Minionette.VERSION = "0.3";
+	Minionette.VERSION = "0.4";
 	Backbone.emulateHTTP = true;
 
 	/////////////////////
 	// MINIONETTE.BINDALL
 	/////////////////////
+
 	var bindAll = Minionette.bindAll = function(obj) {
 		_.bindAll.apply(obj, [obj].concat(_.functions(obj)));
 	};
@@ -29,24 +30,42 @@
 	// DO NOTHING
 	/////////////
 
-	var doNothing = function() {
-	};
+	var doNothing = function(){};
 
 	/////////////////////
 	// COLLECTION TO JSON
 	/////////////////////
 
 	var collectionToJSON = function(collection) {
-		// start building result
-		var result = [];
-
-		// loop over collection
-		collection.each(function(item) {
-			result.push(item.toJSON());
+		// map it and return it
+		return collection.map(function(item) {
+			return item.toJSON();
 		});
+	};
 
-		// done; return result
-		return result;
+	///////////////////////////
+	// SET APPLICATION BINDINGS
+	///////////////////////////
+
+	var setApplicationBindings = function(events, context) {
+		_.each(events, function(handlers, event) {
+			if (event) {
+				_.each((_.isArray(handlers) ? handlers : [handlers]), function(handler) {
+					var setModelAttr = handler.match(/^model\.(.+)$/);
+					context.application.on(event, (setModelAttr ? function(value) {
+						context.model.set(setModelAttr[1], value);
+					} : context[handler]), context);
+				});
+			}
+		});
+	};
+
+	/////////////////////////////
+	// CLEAR APPLICATION BINDINGS
+	/////////////////////////////
+
+	var clearApplicationBindings = function(context) {
+		context.application.off(context, { context: context });
 	};
 
 	////////////////
@@ -63,27 +82,6 @@
 		});
 	};
 
-	///////////////////////////
-	// SET APPLICATION BINDINGS
-	///////////////////////////
-
-	var setApplicationBindings = function(events, context) {
-		_.each(events, function(handler, event) {
-			if (event) {
-				_.each((_.isArray(handler) ? handler : [handler]), function(handler2) {
-					var matches = handler2.match(/^model\.(.+)$/);
-					if (matches) {
-						context.application.bind(event, function(value) {
-							context.model.set(matches[1], value);
-						});
-					} else {
-						context.application.bind(event, context[handler2]);
-					}
-				});
-			}
-		});
-	};
-
 	/////////////////
 	// SET COLLECTION
 	/////////////////
@@ -92,7 +90,9 @@
 		// clear previous listeners and reset collection
 		if ("object" == typeof context.collection) {
 			context.stopListening(context.collection);
-			context.collection.reset();
+			if (context.collection.length) {
+				context.collection.reset();
+			}
 		}
 
 		// set collection to incoming
@@ -182,35 +182,122 @@
 		context.visible = null;
 	};
 
+	////////////////
+	// COMMON REMOVE
+	////////////////
+
+	var commonRemove = function(context) {
+		context.beforeRemove();
+		if (context.leaveEl) {
+			context.undelegateEvents();
+		} else {
+			context.$el.remove();
+		}
+		context.stopListening();
+		clearApplicationBindings(context);
+		return context;
+	};
+
+	///////////////////
+	// COMPILE TEMPLATE
+	///////////////////
+
+	var compileTemplate = function(context) {
+		if (context.templateEl) {
+			context.template = $(context.templateEl).html();
+		}
+		if (context.template && ("function" != typeof context.template)) {
+			context.template = _.template(context.template);
+		}
+	};
+
+	/////////////////
+	// TOGGLE VISIBLE
+	/////////////////
+
+	var toggleVisible = function(context) {
+		if (context.visible) {
+			context.$el.toggle(_.result(context, "visible") ? true : false);
+		}
+	};
+
 	///////////////
 	// VIEW MANAGER
 	///////////////
 
 	var ViewManager = function() {
 		this.views = [];
+		this.names = [];
+		this.length = 0;
 	};
+
+	// add other methods
 	_.extend(ViewManager.prototype, {
-		push: function(view) {
-			this.views.push(view);
+		has: function(name) {
+			return _.contains(this.names, name);
 		},
-		remove: function(view) {
-			this.views = _.without(this.views, view);
+		add: function(view, name) {
+			if (!name) {
+				name = _.uniqueId("view");
+			}
+			this.views.push(view);
+			this.names.push(name);
+			++this.length;
+		},
+		remove: function(name) {
+			if (!name) {
+				name = _.last(this.names);
+				if (!name) {
+					return;
+				}
+			}
+			var index = _.indexOf(this.names, name);
+			if (-1 == index) {
+				return;
+			}
+			var view = this.views.splice(index, 1)[0];
+			this.names.splice(index, 1);
 			view.remove();
+			--this.length;
 		},
 		clear: function() {
 			var view;
 			while (view = this.views.pop()) {
 				view.remove();
 			}
+			this.names = [];
+			this.length = 0;
 		},
 		invoke: function(method) {
+			var args = slice.call(arguments, 1);
 			_.each(this.views, function(view) {
 				if ("function" == typeof view[method]) {
-					view[method]();
+					view[method].apply(view, args);
 				}
 			});
+		},
+		get: function(name) {
+			var index = _.indexOf(this.names, name);
+			if (-1 == index) {
+				return;
+			}
+			return this.views[index];
 		}
 	});
+
+	///////////////
+	// SET BINDINGS
+	///////////////
+
+	var setBindings = function(events, application) {
+		_.each(events, function(handler, event) {
+			if (event) {
+				_.each((_.isArray(handler) ? handler : [handler]), function(handler2) {
+					application.on(event, application[handler2], application);
+				});
+			}
+		});
+	};
 
 	/////////////////////////
 	// MINIONETTE.APPLICATION
@@ -221,12 +308,16 @@
 		// set up options
 		var application = this,
 			options = _.defaults((userOptions || {}), {
+				events: application.events,
 				views: application.views,
 				links: application.links
 			});
 
 		// make sure this always means this
 		bindAll(application);
+
+		// reset events
+		this.events = {};
 
 		// keep track of views
 		this.views = new ViewManager();
@@ -269,15 +360,22 @@
 			view = new view({ application: application });
 
 			// add it to the list
-			application.views.push(view);
+			application.views.add(view);
 		});
+
+		// remember how many views we started with
+		// (used to clear views added via loadView)
+		application.baseViewsCount = application.views.length;
+
+		// bind events
+		setBindings(options.events, application);
 
 		// initialize the application itself
 		application.initialize.apply(application, _.values(options));
 
 		// now that everything is initialized run
 		// any after-initialize functions
-		this.views.invoke("afterInitialize");
+		application.views.invoke("afterInitialize");
 	};
 
 	// add an extend method
@@ -286,45 +384,68 @@
 	// add other methods
 	_.extend(Minionette.Application.prototype, {
 		links: [],
-		initialize: function() {},
-		// this is the event bus, which is
-		// borrowed heavily from radio.js
+		initialize: doNothing,
+		// event bus (inspired by radio.js)
 		events: {},
-		bind: function(name, callback) {
+		on: function(name, callback, context) {
 			if ("undefined" == typeof this.events[name]) {
 				this.events[name] = [];
 			}
-
-			this.events[name].push(callback);
+			this.events[name].push({
+				callback: callback,
+				context: (context || null)
+			});
 		},
-		unbind: function(name, callback) {
-			var event,
-				i;
-
+		off: function(name, options) {
 			if ("undefined" == typeof this.events[name]) {
 				return;
 			}
-
-			event = this.events[name];
-			i = _.indexOf(event, callback);
-			if (i > -1) {
-				event.splice(i, 1);
+			if ("object" != typeof options) {
+				var event = this.events[name];
+				_.each(_.where(event, options), function(remove) {
+					event = _.without(event, remove);
+				});
+				if (event.length) {
+					this.events[name] = event;
+					return;
+				}
 			}
+			delete this.events[name];
 		},
 		trigger: function(name) {
-			var event,
-				args,
-				i,
-				l;
-
 			if ("undefined" == typeof this.events[name]) {
 				return;
 			}
+			var args = slice.call(arguments, 1);
+			_.each(this.events[name], function(event) {
+				event.callback.apply(event.context, args);
+			});
+		},
+		loadView: function(path, data) {
+			// if it already exists, reload data
+			var view = this.views.get(path);
+			if (view && ("function" == typeof view.reload)) {
+				view.reload(data);
+				return;
+			}
 
-			event = this.events[name];
-			args = slice.call(arguments, 1);
-			for (i = 0, l = event.length; i < l; ++i) {
-				event[i].apply(null, args);
+			// load path; initialize view;
+			// add to views; after-initialize
+			var application = this;
+			require([path], function(view) {
+				view = new view({
+					application: application,
+					data: data
+				});
+				application.views.add(view, path);
+				if ("function" == typeof view.afterInitialize) {
+					view.afterInitialize();
+				}
+			});
+		},
+		clearLoadedViews: function() {
+			while (this.views.length > this.baseViewsCount) {
+				this.views.remove();
 			}
 		}
 	});
@@ -344,8 +465,21 @@
 			// bind application events
 			setApplicationBindings((this.applicationEvents || {}), this);
 
+			// compile template
+			compileTemplate(this);
+
 			// call the parent constructor
 			Backbone.View.prototype.constructor.apply(this, arguments);
+		}
+	});
+
+	// add other methods
+	_.extend(Minionette.View.prototype, {
+		template: null,
+		templateEl: null,
+		beforeRemove: doNothing,
+		remove: function() {
+			return commonRemove(this);
 		}
 	});
 
@@ -355,7 +489,7 @@
 
 	Minionette.ItemView = Backbone.View.extend({
 		constructor: function() {
-			var options = arguments[0];
+			var options = (arguments[0] || {});
 
 			// make sure this always means this
 			bindAll(this);
@@ -379,12 +513,7 @@
 			}
 
 			// compile template
-			if (this.templateEl) {
-				this.template = $(this.templateEl).html();
-			}
-			if (this.template && ("function" != typeof this.template)) {
-				this.template = _.template(this.template);
-			}
+			compileTemplate(this);
 
 			// call parent constructor
 			Backbone.View.prototype.constructor.apply(this, arguments);
@@ -393,7 +522,7 @@
 			if (this.model) {
 				this.setModel(this.model, _.defaults(
 					(this.modelEvents || {}),
-					(_.result(this.model.url) ? {
+					(this.model.urlRoot ? {
 						"change": "renderAndSave",
 						"destroy": "removeTriggeredByDestroy"
 					} : {
@@ -439,10 +568,8 @@
 				this.$el.html(this.template(data));
 			}
 
-			// toggle visibility based on value or function
-			if (this.visible) {
-				this.$el.toggle(_.result(this, "visible") ? true : false);
-			}
+			// toggle visibility
+			toggleVisible(this);
 
 			// run after render function
 			this.afterRender();
@@ -460,20 +587,14 @@
 		},
 		beforeRemove: doNothing,
 		remove: function(triggeredByDestroy) {
-			this.beforeRemove();
-			this.$el.remove();
-			this.stopListening();
-			if (this.collection) {
-				this.collection = null;
-			} else if (this.model) {
-				if (!triggeredByDestroy &&
-					_.result(this.model.url)) {
-					this.model.destroy({
-						success: this.ajaxSuccess,
-						error: this.ajaxError
-					});
-				}
-				this.model = null;
+			commonRemove(this);
+			if (this.model &&
+				!triggeredByDestroy &&
+				this.model.urlRoot) {
+				this.model.destroy({
+					success: this.ajaxSuccess,
+					error: this.ajaxError
+				});
 			}
 			return this;
 		},
@@ -511,7 +632,7 @@
 
 	Minionette.ListView = Backbone.View.extend({
 		constructor: function() {
-			var options = arguments[0];
+			var options = (arguments[0] || {});
 
 			// make sure this always means this
 			bindAll(this);
@@ -534,12 +655,7 @@
 				}), this.comparator);
 
 			// compile template
-			if (this.templateEl) {
-				this.template = $(this.templateEl).html();
-			}
-			if (this.template && ("function" != typeof this.template)) {
-				this.template = _.template(this.template);
-			}
+			compileTemplate(this);
 
 			// call parent constructor
 			Backbone.View.prototype.constructor.apply(this, arguments);
@@ -563,12 +679,10 @@
 				application: this.application,
 				model: item
 			});
-			this.views.push(view);
+			this.views.add(view);
 			(this.$itemViewContainer || this.$el).append(view.render().$el);
 		},
-		beforeRender: function(data) {
-			return data;
-		},
+		beforeRender: _.identity,
 		afterRender: doNothing,
 		render: function() {
 			// run before render function
@@ -591,11 +705,8 @@
 			// render collection
 			this.collection.each(this.append);
 
-			// toggle visibility based on value or function
-			if (this.visible) {
-				(this.$itemViewContainer || this.$el).toggle(
-					_.result(this, "visible") ? true : false);
-			}
+			// toggle visibility
+			toggleVisible(this);
 
 			// run after render function
 			this.afterRender();
@@ -618,35 +729,41 @@
 			var collection = this.collection,
 				model = new collection.model(attributes, options);
 
-			if (collection.url) {
-				var success = this.ajaxSuccess,
-					error = this.ajaxError;
-
-				model.save(null, {
-					success: function() {
-						collection.add(model);
-						if (success) {
-							success.apply(null, slice.call(arguments));
-						}
-					},
-					error: error
-				});
-			} else {
+			if (!collection.url) {
 				collection.add(model);
+				toggleVisible(this);
+				return;
 			}
+
+			var that = this;
+			model.save(null, {
+				success: function() {
+					collection.add(model);
+					toggleVisible(that);
+					if (that.success) {
+						that.success.apply(that, slice.call(arguments));
+					}
+				},
+				error: this.error
+			});
 		},
-		setItems: function(items) {
+		reset: function(items) {
 			this.collection.reset(items);
 		},
 		setComparator: function(comparator) {
 			this.collection.comparator = comparator;
 			this.collection.sort();
+		},
+		beforeRemove: doNothing,
+		remove: function() {
+			return commonRemove(this);
 		}
 	});
 
 	////////////////////
 	// UNDERSCORE ADDONS
 	////////////////////
+
 	var moneyRegExp = /^\$?((\d+|\d{1,3}(,\d{3})+)(\.\d{0,2})?|(\d+|\d{1,3}(,\d{3})+)?(\.\d{0,2}))$/;
 	_.money = {
 		validate: function(value) {
